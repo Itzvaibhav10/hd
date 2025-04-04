@@ -1,6 +1,6 @@
 from telethon import TelegramClient, events, Button
-from telethon.tl.types import User
-from telethon.errors import MessageDeleteForbiddenError
+from telethon.tl.types import User, Channel, Chat
+from telethon.errors import MessageDeleteForbiddenError, UserNotParticipantError
 import asyncio
 import random
 import json
@@ -13,19 +13,96 @@ api_id = 29488492
 api_hash = '58b6e5ad1d7eec6c21e97c0706bbd687'
 Bad = TelegramClient('session_name', api_id, api_hash)
 
-# Start command handler
+# Force Subscribe Configuration
+FORCE_SUB_CHANNEL = -2632256651  # Your group ID with -100 prefix
+FORCE_SUB_CHANNEL_LINK = "https://t.me/+caX0bGW4ivBmZjI1"  # Your group invite link
+
+async def force_sub(event):
+    try:
+        # Try to check user's permissions in the channel
+        try:
+            await Bad.get_permissions(FORCE_SUB_CHANNEL, event.sender_id)
+            return True
+        except UserNotParticipantError:
+            # User is not a member
+            try:
+                # Create buttons
+                buttons = [
+                    [Button.url("🔔 Join Group", FORCE_SUB_CHANNEL_LINK)],
+                    [Button.inline("🔄 Check Again", "check_sub")]
+                ]
+                
+                # Send message with buttons
+                await event.reply(
+                    f"""
+**⚠️ Access Denied!**
+
+You need to join our group to use this bot.
+
+**Steps:**
+1. Click the button below to join our group
+2. Come back and click "Check Again"
+3. Start using the bot!
+
+**Group:** {FORCE_SUB_CHANNEL_LINK}
+""",
+                    buttons=buttons
+                )
+                return False
+            except Exception as e:
+                log_error(e, "force_sub - send message")
+                return True  # Allow access if we can't send the message
+        except Exception as e:
+            log_error(e, "force_sub - get_permissions")
+            return True  # Allow access if we can't check
+    except Exception as e:
+        log_error(e, "force_sub check")
+        return True  # Allow access if there's any error
+
+# Callback handler for check sub button
+@Bad.on(events.CallbackQuery(pattern="check_sub"))
+async def check_sub_callback(event):
+    try:
+        # Check if user is now a member using get_permissions
+        try:
+            await Bad.get_permissions(FORCE_SUB_CHANNEL, event.sender_id)
+            # User is a member, send success message
+            await event.answer("✅ You are now a member! You can use the bot.", alert=True)
+            await event.edit(
+                """
+**✅ Access Granted!**
+
+You are now a member of our group.
+You can now use all bot features!
+
+**Enjoy!** 🎉
+"""
+            )
+        except UserNotParticipantError:
+            # User is still not a member
+            await event.answer("❌ You haven't joined the group yet!", alert=True)
+        except Exception as e:
+            log_error(e, "check_sub_callback - get_permissions")
+            await event.answer("❌ An error occurred. Please try again.", alert=True)
+    except Exception as e:
+        log_error(e, "check_sub_callback")
+        await event.answer("❌ An error occurred. Please try again.", alert=True)
 
 # Start command handler
 @Bad.on(events.NewMessage(pattern=r'/start'))
 async def start_command(event):
     try:
+        # Check force sub first
+        if not await force_sub(event):
+            return
+            
         # Create buttons
         buttons = [
             [
-                Button.url("👑 Owner", "https://t.me/Itz_mrunknown"),
-                Button.url("👥 Group", "https://t.me/+xfCjPzSVgiBmZDM1")
+                Button.url("👑 Owner", "https://t.me/Itz_mrunknownn"),
+                Button.url("👥 Group", "https://t.me/+caX0bGW4ivBmZjI1")
             ],
-            [Button.url("🛟 Support", "https://t.me/Itz_mrunknown")]
+            [Button.url("🛟 Support", "https://t.me/Itz_mrunknownn")]
         ]
 
         # Welcome message
@@ -50,10 +127,14 @@ I am a powerful Telegram bot with various features including:
 
 # Global variables
 is_running = False
-DELAY_BETWEEN_MESSAGES = 0.01
+DELAY_BETWEEN_MESSAGES = 0.001  # Fast delay
+MAX_RETRIES = 3  # Maximum number of retries for failed messages
+ERROR_DELAY = 0.1  # Delay after errors
+RATE_LIMIT = 0.05  # Rate limit between messages
+MAX_MESSAGES_PER_MINUTE = 30  # Maximum messages per minute
 
 # Sudo system setup
-OWNER_ID = 7331931794  # Replace with your Telegram ID
+OWNER_ID = 7563987769  # Replace with your Telegram ID
 SUDO_USERS_FILE = "sudo_users.json"
 
 # Initialize sudo users
@@ -174,9 +255,6 @@ async def sudo_list(event):
     except Exception as e:
         print(f"Error in sudolist: {e}")
         await event.reply("❌ Error getting sudo list!")
-# Sudo system setup (keep this part near the top of your file)
-def is_authorized(user_id):
-    return user_id in SUDO_USERS
 
 async def send_unauthorized_message(event):
     await event.reply("""
@@ -219,11 +297,55 @@ async def ping(event):
     except Exception as e:
         print(f"Error in ping command: {e}")
         await event.reply("**Error checking ping!**")
-# ... existing code ...
+
+# Add rate limiting
+class RateLimiter:
+    def __init__(self):
+        self.messages = []
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            # Remove messages older than 1 minute
+            self.messages = [t for t in self.messages if now - t < 60]
+            
+            if len(self.messages) >= MAX_MESSAGES_PER_MINUTE:
+                # Wait until we can send more messages
+                wait_time = 60 - (now - self.messages[0])
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+            
+            self.messages.append(now)
+            await asyncio.sleep(RATE_LIMIT)
+
+rate_limiter = RateLimiter()
+
+# Add error logging function
+def log_error(error, command_name):
+    print(f"\n❌ Error in {command_name}:")
+    print(f"Error details: {str(error)}")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+# Add safe message sending function
+async def safe_send_message(chat_id, message, **kwargs):
+    for retry in range(MAX_RETRIES):
+        try:
+            await rate_limiter.acquire()
+            await Bad.send_message(chat_id, message, **kwargs)
+            return True
+        except Exception as e:
+            if retry == MAX_RETRIES - 1:
+                log_error(e, "safe_send_message")
+            await asyncio.sleep(ERROR_DELAY)
+    return False
 
 # Spam command
 @Bad.on(events.NewMessage(pattern=r'/spam'))
 async def spam_command(event):
+    if not await force_sub(event):
+        return
+        
     if not is_authorized(event.sender_id):
         await send_unauthorized_message(event)
         return
@@ -236,36 +358,30 @@ async def spam_command(event):
             return
             
         count = int(parts[1])
-        if count > 100:  # Limit to prevent abuse
+        if count > 100:
             count = 100
         message = parts[2]
         
         is_running = True
         chat_id = event.chat_id
         
-        await event.delete()
+        try:
+            await event.delete()
+        except Exception as e:
+            log_error(e, "spam_command_delete")
         
         for _ in range(count):
             if not is_running:
                 break
-            try:
-                await Bad.send_message(chat_id, message)
-                await asyncio.sleep(0.1)  # Small delay between messages
-            except Exception as e:
-                await asyncio.sleep(1)
-                continue
+            if not await safe_send_message(chat_id, message):
+                break
                 
     except ValueError:
         await event.reply("Please provide a valid number!")
     except Exception as e:
-        print(f"Error in spam command: {e}")
+        log_error(e, "spam_command")
     finally:
         is_running = False
-
-# ... existing code ...
-# ... (rest of your commands remain the same) ...
-
-# ... (rest of your commands) ...
 
 # Single stop command for all features
 @Bad.on(events.NewMessage(pattern=r'/stop'))
@@ -275,6 +391,7 @@ async def stop_all(event):
         return
     global is_running
     is_running = False
+    
     await event.reply("**⚠️ All running commands have been stopped!**")
 
 # Purge command
@@ -314,9 +431,7 @@ async def purge_messages(event):
         await msg.delete()
     except Exception as e:
         print(f"Error in purge: {e}")
-        # Gali spam command
-# Gali spam command
-# Gali spam command
+
 # Gali spam command
 @Bad.on(events.NewMessage(pattern=r'/gali2'))
 async def start_spam(event):
@@ -333,22 +448,18 @@ async def start_spam(event):
        "CHROME","PE","DALUNGA","TERI","AMMA","KI","KALI","CHUT","KA","KALA","PANI","TERI","MAA","KA",
        "KALA","BHOSDA","MAAR","MAAR","KE","FAD","DUNGA","JAO","APNI","MAA","CHUDAO",
     ]
-    await asyncio.sleep(0.5)
+    
     try:
         await event.delete()
-    except:
-        pass
+    except Exception as e:
+        log_error(e, "gali2_command_delete")
     
     while is_running:
-        try:
-            for msg in gali_messages:
-                if not is_running:
-                    break
-                await Bad.send_message(chat_id, msg)
-                await asyncio.sleep(0.1)
-        except:
-            await asyncio.sleep(1)
-            continue
+        for msg in gali_messages:
+            if not is_running:
+                break
+            if not await safe_send_message(chat_id, msg):
+                break
 
 # BGali2 command (Reply version)
 @Bad.on(events.NewMessage(pattern=r'/bgali2'))
@@ -417,110 +528,12 @@ shayari_messages = [
     "Mohabbat mein junoon sa ho gaya hai\nHar lamha tere liye deewana ho gaya hai 🌹"
 ]
 
-# Shayari spam command# Shayari Raid command
-@Bad.on(events.NewMessage(pattern=r'/sraid'))
-async def shayari_raid(event):
-    if not is_authorized(event.sender_id):
-        await send_unauthorized_message(event)
-        return
-    global is_running
-    
-    try:
-        if not event.reply_to_msg_id:
-            await event.reply("Reply to a user to start shayari raid!")
-            return
+# Add group chat optimization variables
+GROUP_CHAT_DELAY = 0.005  # Very small delay for group chats
+GROUP_CHAT_BATCH_SIZE = 3  # Smaller batch size for group chats
+GROUP_CHAT_MAX_RETRIES = 3  # Fewer retries for group chats
 
-        reply_msg = await event.get_reply_message()
-        target_user = await reply_msg.get_sender()
-        
-        if not target_user:
-            return
-
-        is_running = True
-        chat_id = event.chat_id
-        
-        if isinstance(target_user, User):
-            if target_user.username:
-                user_mention = f"@{target_user.username}"
-            else:
-                user_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
-        else:
-            user_mention = f"[User](tg://user?id={target_user.id})"
-
-        await asyncio.sleep(0.5)
-        try:
-            await event.delete()
-        except:
-            pass
-
-        while is_running:
-            try:
-                for shayari in shayari_messages:
-                    if not is_running:
-                        break
-                    raid_text = f"{user_mention}\n{shayari}"
-                    await Bad.send_message(chat_id, raid_text, parse_mode='md')
-                    await asyncio.sleep(0.1)
-            except Exception as e:
-                await asyncio.sleep(1)
-                continue
-
-    except Exception as e:
-        print(f"Error in shayari raid: {e}")
-        is_running = False
-
-# Bounded Shayari Raid command
-@Bad.on(events.NewMessage(pattern=r'/bsraid'))
-async def bounded_shayari_raid(event):
-    if not is_authorized(event.sender_id):
-        await send_unauthorized_message(event)
-        return
-    global is_running
-    
-    try:
-        parts = event.raw_text.split()
-        if len(parts) < 3:
-            await event.reply("Use format: /bsraid <number> <username>")
-            return
-            
-        number = int(parts[1])
-        if number > 100:  # Added limit
-            number = 100
-        username = parts[2]
-        
-        if not username.startswith("@"):
-            username = "@" + username
-
-        is_running = True
-        chat_id = event.chat_id
-
-        await asyncio.sleep(0.5)
-        try:
-            await event.delete()
-        except:
-            pass
-
-        count = 0
-        while is_running and count < number:
-            try:
-                shayari = shayari_messages[count % len(shayari_messages)]
-                raid_text = f"{username}\n{shayari}"
-                await Bad.send_message(chat_id, raid_text)
-                count += 1
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                await asyncio.sleep(1)
-                continue
-
-    except ValueError:
-        await event.reply("Please provide a valid number!")
-    except Exception as e:
-        print(f"Error in bounded shayari raid: {e}")
-    finally:
-        is_running = False
-        
-        
-        # Raid messages list
+# Raid messages list
 raid_messages = [
     "SUN SUN SUAR KE PILLE JHANTO KE SOUDAGAR APNI MUMMY KI NUDES BHEJ",
     "YA DU TERE GAAND ME TAPAA TAP",
@@ -555,20 +568,26 @@ raid_messages = [
     "TERI BEHEN LETI MERI LUND BADE MASTI SE TERI BEHEN KO MENE CHOD DALA BOHOT SASTE SE"
 ]
 
-# Regular Raid command (continuous)
-# Regular Raid command (continuous)
-# Add this with your other message lists (near raid_messages and shayari_messages)
-gali_messages = [
-    "BACHE","VAIBHAV","TERA","PAPA","APNE","PAPA","SE","MAT","LADO","RAND","KI","AULAAD",
-    "TUMHARI","AMMA","XHUD","JAAYEGI","CHHAKO","KE","SAATH","TUMHARI","AMMA","KA","SEX","VIDEO",
-    "CHROME","PE","DALUNGA","TERI","AMMA","KI","KALI","CHUT","KA","KALA","PANI","TERI","MAA","KA",
-    "KALA","BHOSDA","MAAR","MAAR","KE","FAD","DUNGA","JAO","APNI","MAA","CHUDAO",
+# Chat hang messages list
+hang_messages = [
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️",
+    "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️", "⚡️"
 ]
 
-# Regular Raid command (continuous)
-# Regular Raid command (continuous)
+# Optimize the raid command for faster execution in group chats
 @Bad.on(events.NewMessage(pattern=r'/raid'))
 async def start_raid(event):
+    if not await force_sub(event):
+        return
+        
     if not is_authorized(event.sender_id):
         await send_unauthorized_message(event)
         return
@@ -596,23 +615,112 @@ async def start_raid(event):
         else:
             user_mention = f"[User](tg://user?id={target_user.id})"
 
-        await asyncio.sleep(0.5)
         try:
             await event.delete()
-        except:
-            pass
+        except Exception as e:
+            log_error(e, "raid_command_delete")
 
+        # Rapid raid with minimal delays optimized for group chats
         while is_running:
             try:
-                msg = random.choice(raid_messages)
-                raid_text = f"{user_mention} {msg}"
-                await Bad.send_message(chat_id, raid_text, parse_mode='md')
-                await asyncio.sleep(0.1)
+                # Send multiple raid messages in quick succession
+                for _ in range(GROUP_CHAT_BATCH_SIZE):  # Smaller batch size for groups
+                    if not is_running:
+                        break
+                    msg = random.choice(raid_messages)
+                    raid_text = f"{user_mention} {msg}"
+                    await Bad.send_message(chat_id, raid_text, parse_mode='md')
+                
+                # Minimal delay between batches
+                await asyncio.sleep(GROUP_CHAT_DELAY)
+                
             except Exception as e:
-                await asyncio.sleep(1)
-                continue
+                if "FLOOD_WAIT" in str(e):
+                    # Extract wait time from error message if possible
+                    try:
+                        wait_time = int(str(e).split("seconds")[0].split()[-1])
+                        await asyncio.sleep(wait_time + 0.2)  # Shorter wait time
+                    except:
+                        await asyncio.sleep(1)  # Shorter default wait time
+                elif "CHAT_WRITE_FORBIDDEN" in str(e):
+                    await event.respond("❌ Cannot send messages to this chat!")
+                    is_running = False
+                    break
+                else:
+                    log_error(e, "raid_command")
+                    await asyncio.sleep(0.2)  # Very short delay before retrying
 
     except Exception as e:
+        log_error(e, "raid_command")
+        is_running = False
+
+# Optimize the shayari raid command for faster execution in group chats
+@Bad.on(events.NewMessage(pattern=r'/sraid'))
+async def shayari_raid(event):
+    if not is_authorized(event.sender_id):
+        await send_unauthorized_message(event)
+        return
+    global is_running
+    
+    try:
+        if not event.reply_to_msg_id:
+            await event.reply("Reply to a user to start shayari raid!")
+            return
+
+        reply_msg = await event.get_reply_message()
+        target_user = await reply_msg.get_sender()
+        
+        if not target_user:
+            return
+
+        is_running = True
+        chat_id = event.chat_id
+        
+        if isinstance(target_user, User):
+            if target_user.username:
+                user_mention = f"@{target_user.username}"
+            else:
+                user_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
+        else:
+            user_mention = f"[User](tg://user?id={target_user.id})"
+
+        try:
+            await event.delete()
+        except Exception as e:
+            log_error(e, "sraid_command_delete")
+
+        # Rapid shayari raid with minimal delays optimized for group chats
+        while is_running:
+            try:
+                # Send multiple shayari messages in quick succession
+                for _ in range(GROUP_CHAT_BATCH_SIZE):  # Smaller batch size for groups
+                    if not is_running:
+                        break
+                    shayari = random.choice(shayari_messages)
+                    raid_text = f"{user_mention}\n{shayari}"
+                    await Bad.send_message(chat_id, raid_text, parse_mode='md')
+                
+                # Minimal delay between batches
+                await asyncio.sleep(GROUP_CHAT_DELAY)
+                
+            except Exception as e:
+                if "FLOOD_WAIT" in str(e):
+                    # Extract wait time from error message if possible
+                    try:
+                        wait_time = int(str(e).split("seconds")[0].split()[-1])
+                        await asyncio.sleep(wait_time + 0.2)  # Shorter wait time
+                    except:
+                        await asyncio.sleep(1)  # Shorter default wait time
+                elif "CHAT_WRITE_FORBIDDEN" in str(e):
+                    await event.respond("❌ Cannot send messages to this chat!")
+                    is_running = False
+                    break
+                else:
+                    log_error(e, "sraid_command")
+                    await asyncio.sleep(0.2)  # Very short delay before retrying
+
+    except Exception as e:
+        log_error(e, "sraid_command")
         is_running = False
 
 # Shayari spam command
@@ -706,8 +814,126 @@ async def bounded_raid(event):
     finally:
         is_running = False
 
+@Bad.on(events.NewMessage(pattern=r'/help'))
+async def help_command(event):
+    if not is_authorized(event.sender_id):
+        await send_unauthorized_message(event)
+        return
+        
+    try:
+        help_text = """
+**🤖 Bad Bot Commands Manual**
+
+**🛡️ Admin Commands:**
+• `/addsudo` - Add a sudo user (Owner only)
+• `/delsudo` - Remove a sudo user (Owner only)
+• `/sudolist` - List all sudo users
+
+**⚡ Basic Commands:**
+• `/start` - Start the bot
+• `/ping` - Check bot's response time
+• `/help` - Show this help message
+• `/stop` - Stop any running command
+
+**🔥 Spam Commands:**
+• `/spam <count> <message>` - Spam a message
+• `/shayari <count>` - Spam random shayaris
+• `/gali2` - Start continuous gali spam
+• `/bgali2` - Reply to start bounded gali spam
+
+**⚔️ Raid Commands:**
+• `/raid` - Reply to user to start continuous raid
+• `/braid <count> <username>` - Bounded raid on user
+• `/sraid` - Reply to start shayari raid
+• `/bsraid <count> <username>` - Bounded shayari raid
+
+**🧹 Moderation:**
+• `/purge` - Reply to message to purge from there
+
+**Note:** 
+• Max limit for spam/raid commands is 100
+• Only authorized users can use these commands
+• Use commands responsibly
+
+**👨‍�� Owner:** @Itz_mrunknownn
+"""
+        await event.reply(help_text)
+        
+    except Exception as e:
+        print(f"Error in help command: {e}")
+        await event.reply("An error occurred while showing help!")
+
+# Modify the chat hang command for better performance in group chats
+@Bad.on(events.NewMessage(pattern=r'/hang'))
+async def chat_hang(event):
+    if not is_authorized(event.sender_id):
+        await send_unauthorized_message(event)
+        return
+    global is_running
+    
+    try:
+        if not event.reply_to_msg_id:
+            await event.reply("Reply to a message to start hanging the chat!")
+            return
+
+        reply_msg = await event.get_reply_message()
+        chat_id = event.chat_id
+        
+        is_running = True
+        message_count = 0
+        max_messages = 1000  # Reduced to prevent overload
+        
+        try:
+            await event.delete()
+        except Exception as e:
+            log_error(e, "hang_command_delete")
+            
+        # Send initial message
+        await event.respond("🚀 Starting chat hang...")
+        
+        # Rapid message sending with minimal delays optimized for group chats
+        while is_running and message_count < max_messages:
+            try:
+                # Send multiple messages in quick succession
+                for _ in range(GROUP_CHAT_BATCH_SIZE):  # Smaller batch size for groups
+                    if not is_running or message_count >= max_messages:
+                        break
+                    msg = random.choice(hang_messages)
+                    await Bad.send_message(chat_id, msg)
+                    message_count += 1
+                
+                # Minimal delay between batches
+                await asyncio.sleep(GROUP_CHAT_DELAY)
+                
+            except Exception as e:
+                if "FLOOD_WAIT" in str(e):
+                    # Extract wait time from error message if possible
+                    try:
+                        wait_time = int(str(e).split("seconds")[0].split()[-1])
+                        await asyncio.sleep(wait_time + 0.2)  # Shorter wait time
+                    except:
+                        await asyncio.sleep(1)  # Shorter default wait time
+                elif "CHAT_WRITE_FORBIDDEN" in str(e):
+                    await event.respond("❌ Cannot send messages to this chat!")
+                    is_running = False
+                    break
+                else:
+                    log_error(e, "chat_hang")
+                    await asyncio.sleep(0.2)  # Very short delay before retrying
+                    
+        if message_count >= max_messages:
+            await event.respond(f"✅ Chat hang completed! Sent {message_count} messages.")
+        elif not is_running:
+            await event.respond(f"🛑 Chat hang stopped! Sent {message_count} messages.")
+            
+    except Exception as e:
+        log_error(e, "chat_hang")
+        is_running = False
+        await event.respond("❌ An error occurred while hanging the chat!")
+
 # Start the client
 print("Starting...")
 Bad.start()
 print("Bot Started Successfully!")
 Bad.run_until_disconnected()
+
